@@ -1,0 +1,4 @@
+name "checkedint"
+description "A Checked type for integrals candidate for std.experimental"
+copyright "Copyright © 2016, Andrei Alexandrescu"
+authors "Andrei Alexandrescu"
