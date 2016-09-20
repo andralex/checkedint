@@ -99,8 +99,8 @@ $(TR $(TH `Hook` member) $(TH Semantics in $(D Checked!(T, Hook))))
 $(TR $(TD `defaultValue`) $(TD If defined, `Hook.defaultValue!T` is used as the
 default initializer of the payload.))
 
-$(TR $(TD `min`) $(TD If defined, $(D max(Hook.min!T, minimum)) is used as the
-minimum value of the payload.))
+$(TR $(TD `min`) $(TD If defined, `Hook.min!T` is used as the minimum value of
+the payload.))
 
 $(TR $(TD `max`) $(TD If defined, `Hook.max!T` is used as the maximum value of
 the payload.))
@@ -183,25 +183,22 @@ unittest
     assert(concatAndAdd([1, 2, 3], [4, 5], -1) == [0, 1, 2, 3, 4]);
 }
 
-private T representation(T)(T v) if (isIntegral!T) { return v; }
-
 /**
 Checked integral type wraps an integral `T` and customizes its behavior with the
 help of a `Hook` type. The type wrapped must be one of the predefined integrals
 (unqualified), or another instance of `Checked`.
 */
-struct Checked(T, Hook = Abort, T minimum = T.min, T maximum = T.max)
-if (isIntegral!T && is(T == Unqual!T) ||
-    is(T == Checked!(U, H, min1, max1), U, H, alias min1, alias max1))
+struct Checked(T, Hook = Abort)
+if (isIntegral!T || is(T == Checked!(U, H), U, H))
 {
     import std.algorithm.comparison : among;
-    import std.traits : hasMember, isIntegral;
+    import std.traits : hasMember;
     import std.experimental.allocator.common : stateSize;
 
     /**
-    The type subject to checking (an alias for the `T` parameter).
+    The type of the integral subject to checking.
     */
-    alias Payload = T;
+    alias Representation = T;
 
     // state {
     static if (hasMember!(Hook, "defaultValue"))
@@ -216,17 +213,6 @@ if (isIntegral!T && is(T == Unqual!T) ||
     else alias hook = Hook;
     // } state
 
-    private auto representation()
-    {
-        return payload.representation;
-    }
-
-    unittest
-    {
-        static assert(is(typeof(Checked!(short, Hook)().representation())
-            == short));
-    }
-
     // get
     /**
     Returns a copy of the underlying value.
@@ -238,37 +224,33 @@ if (isIntegral!T && is(T == Unqual!T) ||
         auto x = checked(ubyte(42));
         static assert(is(typeof(x.get()) == ubyte));
         assert(x.get == 42);
+        const y = checked(ubyte(42));
+        static assert(is(typeof(y.get()) == const ubyte));
+        assert(y.get == 42);
     }
-
-    static if (hasMember!(Hook, "min"))
-        private enum minRep =
-            (minimum < Hook.min!T ? Hook.min!T : minimum).representation;
-    else
-        private enum minRep = minimum.representation;
-    static if (hasMember!(Hook, "max"))
-        private enum maxRep =
-            (maximum > Hook.max!T ? Hook.max!T : maximum).representation;
-    else
-        private enum maxRep = maximum.representation;
 
     /**
-
-    Defines the minimum and maximum. If `Hook` defines `min`, then $(D min =
-    Checked(max(minimum, Hook.min!T))). Otherwise,
-
+    Defines the minimum and maximum. These values are hookable by defining
+    `Hook.min` and/or `Hook.max`.
     */
-    enum Checked min = Checked(minRep);
-    /// ditto
-    enum Checked max = Checked(maxRep);
-    ///
-    unittest
+    static if (hasMember!(Hook, "min"))
     {
-        assert(Checked!short.min == -32768);
-        assert(Checked!(short, WithNaN).min == -32767);
-        assert(Checked!(uint, WithNaN).max == uint.max - 1);
+        enum Checked!(T, Hook) min = Checked!(T, Hook)(Hook.min!T);
+        ///
+        unittest
+        {
+            assert(Checked!short.min == -32768);
+            assert(Checked!(short, WithNaN).min == -32767);
+            assert(Checked!(uint, WithNaN).max == uint.max - 1);
+        }
     }
-
-    static assert(minRep <= maxRep);
+    else
+        enum Checked!(T, Hook) min = Checked(T.min);
+    /// ditto
+    static if (hasMember!(Hook, "max"))
+        enum Checked!(T, Hook) max = Checked(Hook.max!T);
+    else
+        enum Checked!(T, Hook) max = Checked(T.max);
 
     /**
     Constructor taking a value properly convertible to the underlying type. `U`
@@ -279,11 +261,13 @@ if (isIntegral!T && is(T == Unqual!T) ||
     this(U)(U rhs)
     if (valueConvertible!(U, T) ||
         !isIntegral!T && is(typeof(T(rhs))) ||
-        is(U == Checked!(V, W, min1, max1), V, W, alias min1, alias max1) &&
-            ProperCompare.hookOpCmp(U.minRep, minRep) >= 0 &&
-            ProperCompare.hookOpCmp(U.maxRep, maxRep) <= 0)
+        is(U == Checked!(V, W), V, W) &&
+            is(typeof(Checked!(T, Hook)(rhs.get))))
     {
-        opAssign(rhs);
+        static if (isIntegral!U)
+            payload = rhs;
+        else
+            payload = rhs.payload;
     }
     ///
     unittest
@@ -297,32 +281,12 @@ if (isIntegral!T && is(T == Unqual!T) ||
     /**
     Assignment operator. Has the same constraints as the constructor.
     */
-    void opAssign(U)(U rhs)
-    if (is(typeof(Checked(rhs))))
+    void opAssign(U)(U rhs) if (is(typeof(Checked!(T, Hook)(rhs))))
     {
         static if (isIntegral!U)
-            alias r = rhs;
+            payload = rhs;
         else
-            auto r = rhs.representation;
-        static if (ProperCompare.hookOpCmp(r.min, minRep) < 0 &&
-            hasMember!(Hook, "onLowerBound"))
-        {
-            if (ProperCompare.hookOpCmp(r, minRep) < 0)
-            {
-                payload = hook.onLowerBound(r, minRep);
-                return;
-            }
-        }
-        static if (ProperCompare.hookOpCmp(maxRep, r.max) < 0 &&
-            hasMember!(Hook, "onUpperBound"))
-        {
-            if (ProperCompare.hookOpCmp(r, maxRep) > 0)
-            {
-                payload = hook.onUpperBound(r, maxRep);
-                return;
-            }
-        }
-        payload = r;
+            payload = rhs.payload;
     }
     ///
     unittest
@@ -355,7 +319,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
     returned.
 
     */
-    U opCast(U)()
+    U opCast(U, this _)()
     if (isIntegral!U || isFloatingPoint!U || is(U == bool))
     {
         static if (hasMember!(Hook, "hookOpCast"))
@@ -408,13 +372,11 @@ if (isIntegral!T && is(T == Unqual!T) ||
     priority is given to the left-hand side.
 
     */
-    bool opEquals(U)(U rhs)
+    bool opEquals(U, this _)(U rhs)
     if (isIntegral!U || isFloatingPoint!U || is(U == bool) ||
-        is(U == Checked!(V, W, min1, max1), V, W, alias min1, alias max1) &&
-            is(typeof(this == rhs.get)))
+        is(U == Checked!(V, W), V, W) && is(typeof(this == rhs.payload)))
     {
-        static if (is(U == Checked!(V, W, min1, max1), V, W,
-            alias min1, alias max1))
+        static if (is(U == Checked!(V, W), V, W))
         {
             alias R = typeof(payload + rhs.payload);
             static if (is(Hook == W))
@@ -446,7 +408,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
     }
 
     ///
-    version(StdDdoc) unittest
+    static if (is(T == int) && is(Hook == void)) unittest
     {
         static struct MyHook
         {
@@ -491,7 +453,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
     priority is given to the left-hand side.
 
     */
-    auto opCmp(U)(const U rhs) //const pure @safe nothrow @nogc
+    auto opCmp(U, this _)(const U rhs) //const pure @safe nothrow @nogc
     if (isIntegral!U || isFloatingPoint!U || is(U == bool))
     {
         static if (hasMember!(Hook, "hookOpCmp"))
@@ -516,25 +478,25 @@ if (isIntegral!T && is(T == Unqual!T) ||
     }
 
     /// ditto
-    auto opCmp(U, H1, alias min1, alias max1)(Checked!(U, H1, min1, max1) rhs)
+    auto opCmp(U, Hook1, this _)(Checked!(U, Hook1) rhs)
     {
         alias R = typeof(payload + rhs.payload);
         static if (valueConvertible!(T, R) && valueConvertible!(U, R))
         {
             return payload < rhs.payload ? -1 : payload > rhs.payload;
         }
-        else static if (is(Hook == H1))
+        else static if (is(Hook == Hook1))
         {
             // Use the lhs hook
             return this.opCmp(rhs.payload);
         }
         else static if (hasMember!(Hook, "hookOpCmp"))
         {
-            return hook.hookOpCmp(payload, rhs);
+            return hook.hookOpCmp(get, rhs.get);
         }
-        else static if (hasMember!(H1, "hookOpCmp"))
+        else static if (hasMember!(Hook1, "hookOpCmp"))
         {
-            return rhs.hook.hookOpCmp(rhs.payload, this);
+            return -rhs.hook.hookOpCmp(rhs.payload, get);
         }
         else
         {
@@ -543,7 +505,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
     }
 
     ///
-    version(StdDdoc) unittest
+    static if (is(T == int) && is(Hook == void)) unittest
     {
         static struct MyHook
         {
@@ -552,18 +514,20 @@ if (isIntegral!T && is(T == Unqual!T) ||
             {
                 static if (isUnsigned!L && !isUnsigned!R)
                 {
-                    if (lhs >= 0 && rhs < 0 && rhs >= lhs)
+                    if (rhs < 0 && rhs >= lhs)
                         thereWereErrors = true;
                 }
                 else static if (isUnsigned!R && !isUnsigned!L)
-                    if (rhs >= 0 && lhs < 0 && lhs >= rhs)
+                {
+                    if (lhs < 0 && lhs >= rhs)
                         thereWereErrors = true;
+                }
                 // Preserve built-in behavior.
                 return lhs < rhs ? -1 : lhs > rhs;
             }
         }
         auto a = checked!MyHook(-42);
-        assert(a < uint(-42));
+        assert(a > uint(42));
         assert(MyHook.thereWereErrors);
         static struct MyHook2
         {
@@ -574,9 +538,12 @@ if (isIntegral!T && is(T == Unqual!T) ||
             }
         }
         MyHook.thereWereErrors = false;
-        assert(Checked!(uint, MyHook2)(uint(-42)) == a);
+        assert(Checked!(uint, MyHook2)(uint(-42)) <= a);
+        //assert(Checked!(uint, MyHook2)(uint(-42)) >= a);
         // Hook on left hand side takes precedence, so no errors
         assert(!MyHook.thereWereErrors);
+        assert(a <= Checked!(uint, MyHook2)(uint(-42)));
+        assert(MyHook.thereWereErrors);
     }
 
     // opUnary
@@ -598,7 +565,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
     value has no positive negation.
 
     */
-    auto opUnary(string op)()
+    auto opUnary(string op, this _)()
     if (op == "+" || op == "-" || op == "~")
     {
         static if (op == "+")
@@ -606,7 +573,6 @@ if (isIntegral!T && is(T == Unqual!T) ||
         else static if (hasMember!(Hook, "hookOpUnary"))
         {
             auto r = hook.hookOpUnary!op(payload);
-            // Note: we're being conservative here with the min and max
             return Checked!(typeof(r), Hook)(r);
         }
         else static if (op == "-" && isIntegral!T && T.sizeof >= 4 &&
@@ -617,9 +583,6 @@ if (isIntegral!T && is(T == Unqual!T) ||
             bool overflow;
             auto r = negs(payload, overflow);
             if (overflow) r = hook.onOverflow!op(payload);
-            //enum min1 = -maxRep, max1 = minRep.min ? maxRep : -minRep;
-            //return Checked!(T, Hook, min1, max1)(r);
-            // Note: we're being conservative here with the min and max
             return Checked(r);
         }
         else
@@ -655,7 +618,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
     }
 
     ///
-    version(StdDdoc) unittest
+    static if (is(T == int) && is(Hook == void)) unittest
     {
         static struct MyHook
         {
@@ -691,16 +654,26 @@ if (isIntegral!T && is(T == Unqual!T) ||
     auto opBinary(string op, Rhs)(const Rhs rhs)
     if (isIntegral!Rhs || isFloatingPoint!Rhs || is(Rhs == bool))
     {
+        return opBinaryImpl!(op, Rhs, typeof(this))(rhs);
+    }
+
+    /// ditto
+    auto opBinary(string op, Rhs)(const Rhs rhs) const
+    if (isIntegral!Rhs || isFloatingPoint!Rhs || is(Rhs == bool))
+    {
+        return opBinaryImpl!(op, Rhs, typeof(this))(rhs);
+    }
+
+    private auto opBinaryImpl(string op, Rhs, this _)(const Rhs rhs)
+    {
         alias R = typeof(payload + rhs);
         static assert(is(typeof(mixin("payload" ~ op ~ "rhs")) == R));
-        // Note: being conservative with min and max
         static if (isIntegral!R) alias Result = Checked!(R, Hook);
         else alias Result = R;
 
         static if (hasMember!(Hook, "hookOpBinary"))
         {
             auto r = hook.hookOpBinary!op(payload, rhs);
-            // Note: being conservative with min and max
             return Checked!(typeof(r), Hook)(r);
         }
         else static if (is(Rhs == bool))
@@ -726,8 +699,19 @@ if (isIntegral!T && is(T == Unqual!T) ||
     }
 
     /// ditto
-    auto opBinary(string op, U, Hook1, alias min1, alias max1)(
-        Checked!(U, Hook1, min1, max1) rhs)
+    auto opBinary(string op, U, Hook1)(Checked!(U, Hook1) rhs)
+    {
+        return opBinaryImpl2!(op, U, Hook1, typeof(this))(rhs);
+    }
+
+    /// ditto
+    auto opBinary(string op, U, Hook1)(Checked!(U, Hook1) rhs) const
+    {
+        return opBinaryImpl2!(op, U, Hook1, typeof(this))(rhs);
+    }
+
+    private
+    auto opBinaryImpl2(string op, U, Hook1, this _)(Checked!(U, Hook1) rhs)
     {
         alias R = typeof(get + rhs.payload);
         static if (valueConvertible!(T, R) && valueConvertible!(U, R) ||
@@ -764,6 +748,13 @@ if (isIntegral!T && is(T == Unqual!T) ||
         }
     }
 
+    static if (is(T == int) && is(Hook == void)) unittest
+    {
+        const a = checked(42);
+        assert(a + 1 == 43);
+        assert(a + checked(uint(42)) == 84);
+    }
+
     // opBinaryRight
     /**
 
@@ -775,16 +766,26 @@ if (isIntegral!T && is(T == Unqual!T) ||
     auto opBinaryRight(string op, Lhs)(const Lhs lhs)
     if (isIntegral!Lhs || isFloatingPoint!Lhs || is(Lhs == bool))
     {
+        return opBinaryRightImpl!(op, Lhs, typeof(this))(lhs);
+    }
+
+    /// ditto
+    auto opBinaryRight(string op, Lhs)(const Lhs lhs) const
+    if (isIntegral!Lhs || isFloatingPoint!Lhs || is(Lhs == bool))
+    {
+        return opBinaryRightImpl!(op, Lhs, typeof(this))(lhs);
+    }
+
+    private auto opBinaryRightImpl(string op, Lhs, this _)(const Lhs lhs)
+    {
         static if (hasMember!(Hook, "hookOpBinaryRight"))
         {
             auto r = hook.hookOpBinaryRight!op(lhs, payload);
-            // Note: being conservative with min and max
             return Checked!(typeof(r), Hook)(r);
         }
         else static if (hasMember!(Hook, "hookOpBinary"))
         {
             auto r = hook.hookOpBinary!op(lhs, payload);
-            // Note: being conservative with min and max
             return Checked!(typeof(r), Hook)(r);
         }
         else static if (is(Lhs == bool))
@@ -800,14 +801,12 @@ if (isIntegral!T && is(T == Unqual!T) ||
             bool overflow;
             auto r = opChecked!op(lhs, T(payload), overflow);
             if (overflow) r = hook.onOverflow!op(42);
-            // Note: being conservative with min and max
             return Checked!(typeof(r), Hook)(r);
         }
         else
         {
             // Default is built-in behavior
             auto r = mixin("lhs" ~ op ~ "T(payload)");
-            // Note: being conservative with min and max
             return Checked!(typeof(r), Hook)(r);
         }
     }
@@ -828,7 +827,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
     `Hook` defines `onLowerBound`, the payload is assigned from $(D
     hook.onLowerBound(result, min)). If `result` is greater than $(D Checked!(T,
     Hook).max) and if `Hook` defines `onUpperBound`, the payload is assigned
-    from $(D hook.onUpperBound(result, max)).
+    from $(D hook.onUpperBound(result, min)).
 
     In all other cases, the built-in behavior is carried out.
 
@@ -849,11 +848,11 @@ if (isIntegral!T && is(T == Unqual!T) ||
         }
         else
         {
-            alias R = typeof(payload + rhs);
+            alias R = typeof(get + rhs);
             auto r = opBinary!op(rhs).payload;
             import std.conv : unsigned;
 
-            static if (ProperCompare.hookOpCmp(R.min, min.payload) < 0 &&
+            static if (ProperCompare.hookOpCmp(R.min, min.get) < 0 &&
                 hasMember!(Hook, "onLowerBound"))
             {
                 if (ProperCompare.hookOpCmp(r, min.get) < 0)
@@ -862,7 +861,7 @@ if (isIntegral!T && is(T == Unqual!T) ||
                     return this;
                 }
             }
-            static if (ProperCompare.hookOpCmp(max.payload, R.max) < 0 &&
+            static if (ProperCompare.hookOpCmp(max.get, R.max) < 0 &&
                 hasMember!(Hook, "onUpperBound"))
             {
                 if (ProperCompare.hookOpCmp(r, max.get) > 0)
@@ -874,6 +873,32 @@ if (isIntegral!T && is(T == Unqual!T) ||
             payload = cast(T) r;
         }
         return this;
+    }
+
+    ///
+    static if (is(T == int) && is(Hook == void)) unittest
+    {
+        static struct MyHook
+        {
+            static bool thereWereErrors;
+            static T onLowerBound(Rhs, T)(Rhs rhs, T bound)
+            {
+                thereWereErrors = true;
+                return bound;
+            }
+            static T onUpperBound(Rhs, T)(Rhs rhs, T bound)
+            {
+                thereWereErrors = true;
+                return bound;
+            }
+        }
+        auto x = checked!MyHook(byte.min);
+        x -= 1;
+        assert(MyHook.thereWereErrors);
+        MyHook.thereWereErrors = false;
+        x = byte.max;
+        x += 1;
+        assert(MyHook.thereWereErrors);
     }
 }
 
@@ -902,7 +927,13 @@ unittest
 // get
 unittest
 {
-    assert(Checked!(ubyte, void)(ubyte(22)).get == 22);
+    void test(T)()
+    {
+        assert(Checked!(T, void)(ubyte(22)).get == 22);
+    }
+    test!ubyte;
+    test!(const ubyte);
+    test!(immutable ubyte);
 }
 
 // Abort
@@ -942,6 +973,7 @@ static:
     Params:
     rhs = The right-hand side value in the assignment, after the operator has
     been evaluated
+    bound = The value of the bound being violated
 
     Returns: Nominally the result is the desired value of the operator, which
     will be forwarded as result. For `Abort`, the function never returns because
@@ -1007,9 +1039,9 @@ static:
     Called automatically upon an overflow during a unary or binary operation.
 
     Params:
-    Lhs = The first argument of `Checked`, e.g. `int` if the left-hand side of
-      the operator is `Checked!int`
-    Rhs = The right-hand side type involved in the operator
+    x = The operator, e.g. `-`
+    lhs = The left-hand side (or sole) argument
+    rhs = The right-hand side type involved in the operator
 
     Returns: Nominally the result is the desired value of the operator, which
     will be forwarded as result. For `Abort`, the function never returns because
@@ -1031,10 +1063,17 @@ static:
 
 unittest
 {
-    Checked!(int, Abort) x;
-    x = 42;
-    short x1 = cast(short) x;
-    //x += long(int.max);
+    void test(T)()
+    {
+        Checked!(int, Abort) x;
+        x = 42;
+        auto x1 = cast(T) x;
+        assert(x1 == 42);
+        //x1 += long(int.max);
+    }
+    test!short;
+    test!(const short);
+    test!(immutable short);
 }
 
 // Warn
@@ -1074,6 +1113,7 @@ static:
     Params:
     rhs = The right-hand side value in the assignment, after the operator has
     been evaluated
+    bound = The bound being violated
 
     Returns: `cast(Lhs) rhs`
     */
@@ -1138,6 +1178,7 @@ static:
     Called automatically upon an overflow during a unary or binary operation.
 
     Params:
+    x = The operator involved
     Lhs = The first argument of `Checked`, e.g. `int` if the left-hand side of
       the operator is `Checked!int`
     Rhs = The right-hand side type involved in the operator
@@ -1167,6 +1208,8 @@ unittest
     auto x = checked!Warn(42);
     short x1 = cast(short) x;
     //x += long(int.max);
+    auto y = checked!Warn(cast(const int) 42);
+    short y1 = cast(const byte) y;
 }
 
 // ProperCompare
@@ -1198,6 +1241,13 @@ struct ProperCompare
     hookOpEquals(x, y)) and $(D hookOpEquals(y, z)) then $(D hookOpEquals(y,
     z)), in case `x`, `y`, and `z` are a mix of integral and floating-point
     numbers.
+
+    Params:
+    lhs = The left-hand side of the comparison for equality
+    rhs = The right-hand side of the comparison for equality
+
+    Returns:
+    The result of the comparison, `true` if the values are equal
     */
     static bool hookOpEquals(L, R)(L lhs, R rhs)
     {
@@ -1255,6 +1305,14 @@ struct ProperCompare
     number, $(D hookOpEquals(x, y)) returns a floating-point number that is `-1`
     if `x < y`, `0` if `x == y`, `1` if `x > y`, and `NaN` if the floating-point
     number is `NaN`.
+
+    Params:
+    lhs = The left-hand side of the comparison for ordering
+    rhs = The right-hand side of the comparison for ordering
+
+    Returns:
+    The result of the comparison (negative if $(D lhs < rhs), positive if $(D
+    lhs > rhs), `0` if the values are equal)
     */
     static auto hookOpCmp(L, R)(L lhs, R rhs)
     {
@@ -1290,7 +1348,7 @@ unittest
     assert(opEqualsProper(42, 42u));
     assert(-1 == 4294967295u);
     assert(!opEqualsProper(-1, 4294967295u));
-    assert(!opEqualsProper(uint(-1), -1));
+    assert(!opEqualsProper(const uint(-1), -1));
     assert(!opEqualsProper(uint(-1), -1.0));
     assert(3_000_000_000U == -1_294_967_296);
     assert(!opEqualsProper(3_000_000_000U, -1_294_967_296));
@@ -1300,6 +1358,10 @@ unittest
 {
     alias opCmpProper = ProperCompare.hookOpCmp;
     assert(opCmpProper(42, 42) == 0);
+    assert(opCmpProper(42, 42.0) == 0);
+    assert(opCmpProper(41, 42.0) < 0);
+    assert(opCmpProper(42, 41.0) > 0);
+    assert(opCmpProper(41, double.init) is double.init);
     assert(opCmpProper(42u, 42) == 0);
     assert(opCmpProper(42, 42u) == 0);
     assert(opCmpProper(-1, uint(-1)) < 0);
@@ -1318,7 +1380,7 @@ unittest
 /**
 
 Hook that reserves a special value as a "Not a Number" representative. For
-signed integrals, the reserved value is `T.min`. For unsigned integrals, the
+signed integrals, the reserved value is `T.min`. For signed integrals, the
 reserved value is `T.max`.
 
 The default value of a $(D Checked!(X, WithNaN)) is its NaN value, so care must
@@ -1367,17 +1429,32 @@ static:
         }
         else
         {
-            if (isUnsigned!Rhs || !isUnsigned!Lhs ||
-                    Rhs.sizeof > Lhs.sizeof || rhs >= 0)
+            // Not value convertible, only viable option is rhs fits within the
+            // bounds of Lhs
+            static if (ProperCompare.hookOpCmp(Rhs.min, Lhs.min) < 0)
             {
-                auto result = cast(Lhs) rhs;
-                // If signedness is different, we need additional checks
-                if (result == rhs &&
-                        (!isUnsigned!Rhs || isUnsigned!Lhs || result >= 0))
-                    return result;
+                // Example: hookOpCast!short(int(42)), hookOpCast!uint(int(42))
+                if (ProperCompare.hookOpCmp(rhs, Lhs.min) < 0)
+                    return defaultValue!Lhs;
             }
-            return defaultValue!Lhs;
+            static if (ProperCompare.hookOpCmp(Rhs.max, Lhs.max) > 0)
+            {
+                // Example: hookOpCast!int(uint(42))
+                if (ProperCompare.hookOpCmp(rhs, Lhs.max) > 0)
+                    return defaultValue!Lhs;
+            }
+            return cast(Lhs) rhs;
         }
+    }
+
+    ///
+    unittest
+    {
+        auto x = checked!WithNaN(422);
+        assert((cast(ubyte) x) == 255);
+        x = checked!WithNaN(-422);
+        assert((cast(byte) x) == -128);
+        assert(cast(short) x == -422);
     }
 
     /**
@@ -1385,9 +1462,8 @@ static:
     failures.
 
     Params:
-    T = The target of the assignment (`T` is the first argument to
-    `Checked`)
     Rhs = The right-hand side type in the assignment
+    T = The bound type (value of the bound is not used)
 
     Returns: `WithNaN.defaultValue!Lhs`
     */
@@ -1440,6 +1516,15 @@ static:
             : lhs > rhs ? 1.0 : lhs == rhs ? 0.0 : double.init;
     }
 
+    ///
+    unittest
+    {
+        Checked!(int, WithNaN) x;
+        assert(!(x < 0) && !(x > 0) && !(x == 0));
+        x = 1;
+        assert(x > 0 && !(x < 0) && !(x == 0));
+    }
+
     /**
     Defines hooks for unary operators `-`, `~`, `++`, and `--`.
 
@@ -1488,6 +1573,18 @@ static:
         {
             if (v != defaultValue!T) --v;
         }
+    }
+
+    ///
+    unittest
+    {
+        Checked!(int, WithNaN) x;
+        ++x;
+        assert(x.isNaN);
+        x = 1;
+        assert(!x.isNaN);
+        ++x;
+        assert(!x.isNaN);
     }
 
     /**
@@ -1577,27 +1674,112 @@ static:
             ? defaultValue!L
             : hookOpCast!L(temp);
     }
+
+    ///
+    unittest
+    {
+        Checked!(int, WithNaN) x;
+        x += 4;
+        assert(x.isNaN);
+        x = 0;
+        x += 4;
+        assert(!x.isNaN);
+        x += int.max;
+        assert(x.isNaN);
+    }
 }
 
 ///
 unittest
 {
     auto x1 = Checked!(int, WithNaN)();
+    assert(x1.isNaN);
     assert(x1.get == int.min);
     assert(x1 != x1);
     assert(!(x1 < x1));
     assert(!(x1 > x1));
     assert(!(x1 == x1));
     ++x1;
+    assert(x1.isNaN);
     assert(x1.get == int.min);
     --x1;
+    assert(x1.isNaN);
     assert(x1.get == int.min);
     x1 = 42;
+    assert(!x1.isNaN);
     assert(x1 == x1);
     assert(x1 <= x1);
     assert(x1 >= x1);
     static assert(x1.min == int.min + 1);
     x1 += long(int.max);
+}
+
+/**
+Queries whether a $(D Checked!(T, WithNaN)) object is not a number (NaN).
+
+Params: x = the `Checked` instance queried
+
+Returns: `true` if `x` is a NaN, `false` otherwise
+*/
+bool isNaN(T)(const Checked!(T, WithNaN) x)
+{
+    return x.get == x.init.get;
+}
+
+///
+unittest
+{
+    auto x1 = Checked!(int, WithNaN)();
+    assert(x1.isNaN);
+    x1 = 1;
+    assert(!x1.isNaN);
+    x1 = x1.init;
+    assert(x1.isNaN);
+}
+
+unittest
+{
+    void test1(T)()
+    {
+        auto x1 = Checked!(T, WithNaN)();
+        assert(x1.isNaN);
+        assert(x1.get == int.min);
+        assert(x1 != x1);
+        assert(!(x1 < x1));
+        assert(!(x1 > x1));
+        assert(!(x1 == x1));
+        assert(x1.get == int.min);
+        auto x2 = Checked!(T, WithNaN)(42);
+        assert(!x2.isNaN);
+        assert(x2 == x2);
+        assert(x2 <= x2);
+        assert(x2 >= x2);
+        static assert(x2.min == T.min + 1);
+    }
+    test1!int;
+    test1!(const int);
+    test1!(immutable int);
+
+    void test2(T)()
+    {
+        auto x1 = Checked!(T, WithNaN)();
+        assert(x1.get == T.min);
+        assert(x1 != x1);
+        assert(!(x1 < x1));
+        assert(!(x1 > x1));
+        assert(!(x1 == x1));
+        ++x1;
+        assert(x1.get == T.min);
+        --x1;
+        assert(x1.get == T.min);
+        x1 = 42;
+        assert(x1 == x1);
+        assert(x1 <= x1);
+        assert(x1 >= x1);
+        static assert(x1.min == T.min + 1);
+        x1 += long(T.max);
+    }
+    test2!int;
 }
 
 unittest
@@ -1607,7 +1789,7 @@ unittest
     assert(x1 != x1);
     x1 = -1;
     assert(x1 < 1u);
-    auto x2 = Smart!int(42);
+    auto x2 = Smart!(const int)(42);
 }
 
 // Saturate
@@ -1631,10 +1813,9 @@ static:
     not fit in `Lhs` without loss of information or a change in sign.
 
     Params:
-    T = The target of the assignment (`T` is the first argument to
-    `Checked`)
     Rhs = The right-hand side type in the assignment, after the operation has
     been computed
+    bound = The bound being violated
 
     Returns: `Lhs.max` if $(D rhs >= 0), `Lhs.min` otherwise.
 
@@ -1759,6 +1940,14 @@ $(LI Otherwise, set `overflow` to `true` and return an unspecified value)
 The implementation exploits properties of types and operations to minimize
 additional work.
 
+Params:
+x = The binary operator involved, e.g. `/`
+lhs = The left-hand side of the operator
+rhs = The right-hand side of the operator
+error = The error indicator (assigned `true` in case there's an error)
+
+Returns:
+The result of the operation, which is the same as the built-in operator
 */
 typeof(L() + R()) opChecked(string x, L, R)(const L lhs, const R rhs,
     ref bool error)
@@ -1820,7 +2009,7 @@ if (isIntegral!L && isIntegral!R)
         else static if (x == "/" || x == "%")
         {
             static if (!isUnsigned!L && !isUnsigned!R &&
-                is(L == Result) && op == "/")
+                is(L == Result) && x == "/")
             {
                 if (lhs == Result.min && rhs == -1) goto fail;
             }
@@ -1896,7 +2085,7 @@ fail:
 unittest
 {
     bool overflow;
-    assert(opChecked!"+"(short(1), short(1), overflow) == 2 && !overflow);
+    assert(opChecked!"+"(const short(1), short(1), overflow) == 2 && !overflow);
     assert(opChecked!"+"(1, 1, overflow) == 2 && !overflow);
     assert(opChecked!"+"(1, 1u, overflow) == 2 && !overflow);
     assert(opChecked!"+"(-1, 1u, overflow) == 0 && !overflow);
@@ -2088,7 +2277,7 @@ version(unittest) private struct CountOpBinary
 // opBinary
 @nogc nothrow pure @safe unittest
 {
-    auto x = Checked!(int, void)(42), y = Checked!(int, void)(142);
+    auto x = Checked!(const int, void)(42), y = Checked!(immutable int, void)(142);
     assert(x + y == 184);
     assert(x + 100 == 142);
     assert(y - x == 100);
@@ -2115,6 +2304,9 @@ version(unittest) private struct CountOpBinary
     assert(x1.hook.calls == 1);
     assert(x1 << 42 == x1.get << x1.get);
     assert(x1.hook.calls == 2);
+    x1 = int.min;
+    assert(x1 - 1 == int.max);
+    assert(x1.hook.calls == 3);
 
     auto x2 = Checked!(int, CountOpBinary)(42);
     assert(x2 + 1 == 43);
@@ -2184,6 +2376,8 @@ unittest
     assert((x1 += 2) == 5);
     x1 *= 2_000_000_000L;
     assert(x1.hook.calls == 1);
+    x1 *= -2_000_000_000L;
+    assert(x1.hook.calls == 2);
 
     auto x2 = Checked!(ushort, CountOverflows)(ushort(3));
     assert((x2 += 2) == 5);
@@ -2459,7 +2653,7 @@ unittest
 
     x = 42;
     assert(x == 42);
-    short _short = 43;
+    const short _short = 43;
     x = _short;
     assert(x == _short);
     ushort _ushort = 44;
@@ -2475,7 +2669,7 @@ unittest
     assert(cast(long) x == 44);
     assert(cast(short) x == 44);
 
-    Checked!(uint, void) y;
+    const Checked!(uint, void) y;
     assert(y <= y);
     assert(y == 0);
     assert(y < x);
