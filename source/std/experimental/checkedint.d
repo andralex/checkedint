@@ -58,6 +58,9 @@ Saturate)) "stops" at `int.max` for all operations that would cause an `int` to
 overflow toward infinity, and at `int.min` for all operations that would
 correspondingly overflow toward negative infinity.
 )
+$(LI $(LREF Throw), like $(D Abort), immediately fails on a bounds error, but it
+throws a CheckFailure exception in place of `assert(0)`.
+)
 )
 
 These policies may be used alone, e.g. $(D Checked!(uint, WithNaN)) defines a
@@ -150,12 +153,12 @@ operand) is forwarded to unconditionally for binary operators `+=`,  `-=`, `*=`,
 $(TR $(TD `onLowerBound`) $(TD If defined, $(D hook.onLowerBound(value, bound))
 (where `value` is the value being assigned) is forwarded to when the result of
 binary operators `+=`,  `-=`, `*=`, `/=`, `%=`, `^^=`, `&=`, `|=`, `^=`, `<<=`, `>>=`,
-and `>>>=` is smaller than the smallest value representable by `T`.)
+and `>>>=` is less than the minimum value representable by `T`.)
 )
 $(TR $(TD `onUpperBound`) $(TD If defined, $(D hook.onUpperBound(value, bound))
 (where `value` is the value being assigned) is forwarded to when the result of
 binary operators `+=`,  `-=`, `*=`, `/=`, `%=`, `^^=`, `&=`, `|=`, `^=`, `<<=`, `>>=`,
-and `>>>=` is larger than the largest value representable by `T`.)
+and `>>>=` is greater than the maximum value representable by `T`.)
 )
 )
 
